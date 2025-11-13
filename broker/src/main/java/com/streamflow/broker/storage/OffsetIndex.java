@@ -78,40 +78,118 @@ public class OffsetIndex {
     }
 
     /**
-
-    /**
-     * Append an index entry
+     * Lookup the file position for a given offset using binary search
+     * Returns the position of the largest offset <= target offset
      */
-    public synchronized void append(long offset, int position) {
-        if (entries >= maxEntries) {
-            log.warn("Index full, cannot add more entries: {}", file);
-            return;
+    public synchronized OffsetPosition lookup(long targetOffset) {
+        if (entries == 0) {
+            return new OffsetPosition(baseOffset, 0);
         }
 
-        mmap.putLong(offset);
-        mmap.putInt(position);
-        entries++;
+        // Binary search to find the largest offset <= targetOffset
+        int low = 0;
+        int high = entries - 1;
+        int resultIndex = -1;
+
+        while (low <= high) {
+            int mid = (low + high) / 2;
+            long midOffset = readOffset(mid);
+
+            if (midOffset == targetOffset) {
+                resultIndex = mid;
+                break;
+            } else if (midOffset < targetOffset) {
+                resultIndex = mid;
+                low = mid + 1;
+            } else {
+                high = mid - 1;
+            }
+        }
+
+        if (resultIndex == -1) {
+            return new OffsetPosition(baseOffset, 0);
+        }
+
+        long offset = readOffset(resultIndex);
+        int position = readPosition(resultIndex);
+
+        return new OffsetPosition(offset, position);
     }
 
     /**
-     * Flush index to disk
+     * Read offset at given index position
      */
-    public void flush() {
-        if (mmap != null) {
-            mmap.force();
-        }
+    private long readOffset(int index) {
+        return mmap.getLong(index * INDEX_ENTRY_SIZE);
     }
 
     /**
-     * Close the index
+     * Read file position at given index position
      */
-    public void close() {
+    private int readPosition(int index) {
+        return mmap.getInt(index * INDEX_ENTRY_SIZE + 8);
+    }
+
+    /**
+     * Count number of valid entries in the index
+     */
+    private int countEntries() {
+        int count = 0;
+        for (int i = 0; i < MAX_INDEX_SIZE / INDEX_ENTRY_SIZE; i++) {
+            long offset = mmap.getLong(i * INDEX_ENTRY_SIZE);
+            if (offset == 0) {
+                break;
+            }
+            count++;
+        }
+        return count;
+    }
+
+    /**
+     * Get the number of entries in the index
+     */
+    public int getEntries() {
+        return entries;
+    }
+
+    /**
+     * Get the base offset for this index
+     */
+    public long getBaseOffset() {
+        return baseOffset;
+    }
+
+    /**
+     * Flush the memory-mapped buffer to disk
+     */
+    public synchronized void flush() {
+        mmap.force();
+    }
+
+    /**
+     * Close the index file
+     */
+    public synchronized void close() {
         try {
             flush();
-            if (fileChannel != null) fileChannel.close();
-            if (raf != null) raf.close();
+            channel.close();
+            raf.close();
+            log.info("Closed index file: {}", file.getName());
         } catch (IOException e) {
-            throw new StorageException("Failed to close index: " + file, e);
+            throw new StorageException("Failed to close index file: " + file, e);
+        }
+    }
+
+    /**
+     * Result of offset lookup containing both offset and position
+     */
+    public static class OffsetPosition {
+        public final long offset;
+        public final int position;
+
+        public OffsetPosition(long offset, int position) {
+            this.offset = offset;
+            this.position = position;
         }
     }
 }
