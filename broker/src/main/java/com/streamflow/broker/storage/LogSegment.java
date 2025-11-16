@@ -118,6 +118,68 @@ public class LogSegment {
         }
     }
 
+    /**
+     * Read messages starting from the given offset
+     * Returns up to maxRecords messages or maxBytes worth of data
+     */
+    public synchronized List<Message> read(long startOffset, int maxRecords, int maxBytes) {
+        List<Message> messages = new ArrayList<>();
+
+        try {
+            // Validate offset range
+            if (startOffset < baseOffset || startOffset >= nextOffset) {
+                return messages;
+            }
+
+            // Look up the file position for the start offset
+            OffsetIndex.OffsetPosition indexEntry = offsetIndex.lookup(startOffset);
+            int position = indexEntry.position;
+
+            // Read from the log file
+            ByteBuffer buffer = ByteBuffer.allocate(Math.min(maxBytes, (int) (fileChannel.size() - position)));
+            fileChannel.read(buffer, position);
+            buffer.flip();
+
+            // Parse messages
+            int bytesRead = 0;
+            while (buffer.hasRemaining() && messages.size() < maxRecords && bytesRead < maxBytes) {
+                int messageStart = buffer.position();
+
+                // Check if we have enough bytes to read the message header
+                if (buffer.remaining() < 24) { // min header size
+                    break;
+                }
+
+                // Parse message
+                int messageSize = Message.parseMessageSize(buffer, messageStart);
+                if (buffer.remaining() < messageSize) {
+                    break; // Incomplete message
+                }
+
+                byte[] messageData = new byte[messageSize];
+                buffer.get(messageData);
+
+                Message message = Message.deserialize(messageData);
+
+                // Only include messages >= startOffset
+                if (message.getOffset() >= startOffset) {
+                    messages.add(message);
+                    bytesRead += messageSize;
+                }
+            }
+
+            log.debug("Read {} messages from offset {}, bytes read: {}", messages.size(), startOffset, bytesRead);
+
+        } catch (IOException e) {
+            throw new StorageException("Failed to read from log segment", e);
+        }
+
+        return messages;
+    }
+
+    /**
+     * Get the size of this segment in bytes
+     */
     public synchronized long size() {
         try {
             return fileChannel.size();
@@ -126,30 +188,118 @@ public class LogSegment {
         }
     }
 
-    public long getNextOffset() { return nextOffset; }
-    public long getBaseOffset() { return baseOffset; }
-    public boolean isEmpty() { return nextOffset == baseOffset; }
+    /**
+     * Get the next offset that will be assigned
+     */
+    public long getNextOffset() {
+        return nextOffset;
+    }
 
+    /**
+     * Get the base offset of this segment
+     */
+    public long getBaseOffset() {
+        return baseOffset;
+    }
+
+    /**
+     * Check if this segment is empty
+     */
+    public boolean isEmpty() {
+        return nextOffset == baseOffset;
+    }
+
+    /**
+     * Flush the segment to disk
+     */
     public synchronized void flush() {
         try {
             fileChannel.force(true);
             offsetIndex.flush();
+            log.debug("Flushed log segment: {}", logFile.getName());
         } catch (IOException e) {
             throw new StorageException("Failed to flush log segment", e);
         }
     }
 
+    /**
+     * Close the segment
+     */
     public synchronized void close() {
         try {
             flush();
             fileChannel.close();
             raf.close();
             offsetIndex.close();
+            log.info("Closed log segment: {}", logFile.getName());
         } catch (IOException e) {
             throw new StorageException("Failed to close log segment", e);
         }
     }
 
+    /**
+     * Delete the segment files
+     */
+    public synchronized void delete() {
+        try {
+            close();
+            if (logFile.exists() && !logFile.delete()) {
+                log.warn("Failed to delete log file: {}", logFile);
+            }
+            if (indexFile.exists() && !indexFile.delete()) {
+                log.warn("Failed to delete index file: {}", indexFile);
+            }
+            log.info("Deleted log segment: {}", logFile.getName());
+        } catch (Exception e) {
+            throw new StorageException("Failed to delete log segment", e);
+        }
+    }
+
+    /**
+     * Recover the next offset by scanning the log file
+     */
+    private long recoverNextOffset() throws IOException {
+        long offset = baseOffset;
+        long position = 0;
+        long fileSize = fileChannel.size();
+
+        ByteBuffer buffer = ByteBuffer.allocate(1024 * 1024); // 1MB buffer
+
+        while (position < fileSize) {
+            buffer.clear();
+            int bytesRead = fileChannel.read(buffer, position);
+            if (bytesRead <= 0) {
+                break;
+            }
+
+            buffer.flip();
+
+            while (buffer.hasRemaining()) {
+                if (buffer.remaining() < 24) {
+                    break; // Not enough for header
+                }
+
+                int messageStart = buffer.position();
+                int messageSize = Message.parseMessageSize(buffer, messageStart);
+
+                if (buffer.remaining() < messageSize) {
+                    break; // Incomplete message
+                }
+
+                // Skip to next message
+                buffer.position(messageStart + messageSize);
+                offset++;
+            }
+
+            position += bytesRead;
+        }
+
+        return offset;
+    }
+
+    /**
+     * Format the segment file name based on base offset
+     */
     private static String formatFileName(long offset, String extension) {
         return String.format("%020d%s", offset, extension);
     }
