@@ -161,57 +161,163 @@ public class Partition {
         }
     }
 
+    /**
+     * Get the log end offset (next offset to be assigned)
+     */
     public long getLogEndOffset() {
         lock.readLock().lock();
-        try { return nextOffset; } finally { lock.readLock().unlock(); }
+        try {
+            return nextOffset;
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
+    /**
+     * Get the log start offset (oldest available offset)
+     */
     public long getLogStartOffset() {
         lock.readLock().lock();
         try {
             return segments.isEmpty() ? 0 : segments.get(0).getBaseOffset();
-        } finally { lock.readLock().unlock(); }
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
-    public int getPartitionId() { return partitionId; }
-    public String getTopicName() { return topicName; }
+    /**
+     * Flush all segments to disk
+     */
+    public void flush() {
+        lock.readLock().lock();
+        try {
+            for (LogSegment segment : segments) {
+                segment.flush();
+            }
+            log.debug("Flushed partition: topic={}, partition={}", topicName, partitionId);
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
 
+    /**
+     * Close the partition and all its segments
+     */
+    public void close() {
+        lock.writeLock().lock();
+        try {
+            for (LogSegment segment : segments) {
+                segment.close();
+            }
+            log.info("Closed partition: topic={}, partition={}", topicName, partitionId);
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Delete old segments up to the given offset (log retention)
+     */
+    public void deleteSegmentsUpTo(long offset) {
+        lock.writeLock().lock();
+        try {
+            List<LogSegment> toDelete = segments.stream()
+                    .filter(seg -> seg.getNextOffset() <= offset)
+                    .filter(seg -> seg != activeSegment)
+                    .collect(Collectors.toList());
+
+            for (LogSegment segment : toDelete) {
+                segment.delete();
+                segments.remove(segment);
+            }
+
+            if (!toDelete.isEmpty()) {
+                log.info("Deleted {} old segments from partition: topic={}, partition={}",
+                        toDelete.size(), topicName, partitionId);
+            }
+
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Get partition ID
+     */
+    public int getPartitionId() {
+        return partitionId;
+    }
+
+    /**
+     * Get topic name
+     */
+    public String getTopicName() {
+        return topicName;
+    }
+
+    /**
+     * Get the number of segments
+     */
     public int getSegmentCount() {
         lock.readLock().lock();
-        try { return segments.size(); } finally { lock.readLock().unlock(); }
+        try {
+            return segments.size();
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
+    /**
+     * Roll to a new active segment
+     */
     private void roll() {
         log.info("Rolling to new segment: topic={}, partition={}, currentOffset={}",
                 topicName, partitionId, nextOffset);
+
         LogSegment newSegment = new LogSegment(partitionDir, nextOffset);
         segments.add(newSegment);
         activeSegment = newSegment;
     }
 
+    /**
+     * Find the segment that contains the given offset
+     */
     private LogSegment findSegment(long offset) {
+        // Segments are ordered by base offset, so we can use binary search
         for (int i = segments.size() - 1; i >= 0; i--) {
             LogSegment segment = segments.get(i);
-            if (offset >= segment.getBaseOffset()) return segment;
+            if (offset >= segment.getBaseOffset()) {
+                return segment;
+            }
         }
         return null;
     }
 
+    /**
+     * Load existing segments from disk or create a new one
+     */
     private void loadSegments() {
         File[] files = partitionDir.listFiles((dir, name) -> name.endsWith(".log"));
+
         if (files == null || files.length == 0) {
+            // No existing segments, create a new one
             LogSegment segment = new LogSegment(partitionDir, 0);
             segments.add(segment);
             activeSegment = segment;
             nextOffset = 0;
         } else {
+            // Load existing segments
             for (File logFile : files) {
                 String fileName = logFile.getName();
                 long baseOffset = Long.parseLong(fileName.substring(0, fileName.length() - 4));
                 LogSegment segment = new LogSegment(partitionDir, baseOffset);
                 segments.add(segment);
             }
+
+            // Sort segments by base offset
             segments.sort((s1, s2) -> Long.compare(s1.getBaseOffset(), s2.getBaseOffset()));
+
+            // The last segment is the active segment
             activeSegment = segments.get(segments.size() - 1);
             nextOffset = activeSegment.getNextOffset();
         }
