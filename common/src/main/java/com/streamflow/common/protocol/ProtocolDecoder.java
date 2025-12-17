@@ -58,4 +58,17 @@ public class ProtocolDecoder extends ByteToMessageDecoder {
         int payloadSize = size - 4; // subtract apiKey(2) + version(2)
         byte[] payload = new byte[payloadSize];
         in.readBytes(payload);
+
+        try {
+            // Deserialize request
+            Request request = Request.deserialize(apiKey, version, payload);
+            out.add(request);
+
+            log.debug("Decoded request: {}", request.getClass().getSimpleName());
+
+        } catch (Exception e) {
+            log.error("Failed to decode request: apiKey={}, version={}", apiKey, version, e);
+            ctx.close();
+        }
+    }
 }
