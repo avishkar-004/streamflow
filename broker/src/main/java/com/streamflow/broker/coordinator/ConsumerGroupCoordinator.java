@@ -109,22 +109,53 @@ public class ConsumerGroupCoordinator {
         }
     }
 
+    /**
+     * Process heartbeat from a consumer
+     *
+     * @return true if heartbeat accepted, false if consumer not in group
+     */
+    public boolean heartbeat(String groupId, String consumerId) {
+        ConsumerGroup group = groups.get(groupId);
+        if (group == null) {
+            log.warn("Heartbeat from {} for unknown group {}", consumerId, groupId);
+            return false;
+        }
+
+        return group.heartbeat(consumerId);
+    }
+
+    /**
+     * Get current assignment for a consumer
+     */
     public List<Integer> getAssignment(String groupId, String consumerId) {
         ConsumerGroup group = groups.get(groupId);
-        if (group == null) return Collections.emptyList();
+        if (group == null) {
+            return Collections.emptyList();
+        }
+
         return group.getAssignment(consumerId);
     }
 
+    /**
+     * Get all groups
+     */
     public List<ConsumerGroup> getAllGroups() {
         return new ArrayList<>(groups.values());
     }
 
+    /**
+     * Get a specific group
+     */
     public ConsumerGroup getGroup(String groupId) {
         return groups.get(groupId);
     }
 
+    /**
+     * Get partition counts for topics
+     */
     private Map<String, Integer> getPartitionCounts(Set<String> topics) {
         Map<String, Integer> counts = new HashMap<>();
+
         for (String topicName : topics) {
             try {
                 Topic topic = topicManager.getTopic(topicName);
@@ -133,10 +164,45 @@ public class ConsumerGroupCoordinator {
                 log.warn("Topic {} not found, skipping", topicName);
             }
         }
+
         return counts;
+    }
+
+
+    private void startHeartbeatMonitoring() {
+        scheduler.scheduleAtFixedRate(() -> {
+            try {
+                for (ConsumerGroup group : groups.values()) {
+                    List<String> deadMembers = group.findDeadMembers();
+                    if (!deadMembers.isEmpty()) {
+                        log.warn("Found {} dead members in group {}: {}",
+                                deadMembers.size(), group.getGroupId(), deadMembers);
+                        for (String deadMember : deadMembers) {
+                            group.removeMember(deadMember);
+                        }
+                        if (!group.isEmpty()) {
+                            Map<String, Integer> partitionCounts =
+                                    getPartitionCounts(group.getSubscribedTopics());
+                            group.rebalance(partitionCounts);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.error("Error in heartbeat monitoring", e);
+            }
+        }, HEARTBEAT_CHECK_INTERVAL_MS, HEARTBEAT_CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        log.info("Started heartbeat monitoring (interval: {}ms)", HEARTBEAT_CHECK_INTERVAL_MS);
     }
 
     public void shutdown() {
         log.info("Shutting down ConsumerGroupCoordinator");
+        scheduler.shutdown();
+        try {
+            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                scheduler.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            scheduler.shutdownNow();
+        }
     }
 }
