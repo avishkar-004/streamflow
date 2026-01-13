@@ -128,22 +128,86 @@ public class ConsumerGroup {
         Instant now = Instant.now();
         List<String> deadMembers = new ArrayList<>();
 
+        for (Map.Entry<String, Instant> entry : members.entrySet()) {
+            long timeSinceHeartbeat = now.toEpochMilli() - entry.getValue().toEpochMilli();
+            if (timeSinceHeartbeat > HEARTBEAT_TIMEOUT_MS) {
+                deadMembers.add(entry.getKey());
+                log.warn("Consumer {} in group {} is dead (no heartbeat for {}ms)",
+                        entry.getKey(), groupId, timeSinceHeartbeat);
+            }
+        }
 
+        return deadMembers;
+    }
+
+    /**
+     * Perform rebalancing - assign partitions to members
+     *
+     * @param partitionCounts Map of topic -> partition count
+     * @return New assignment map
+     */
+    public synchronized Map<String, List<Integer>> rebalance(Map<String, Integer> partitionCounts) {
+        log.info("Rebalancing group {}: {} members, {} topics",
+                groupId, members.size(), subscribedTopics.size());
+
+        currentAssignment.clear();
+
+        // For each subscribed topic, assign its partitions to members
+        for (String topic : subscribedTopics) {
+            Integer partitionCount = partitionCounts.get(topic);
+            if (partitionCount == null || partitionCount == 0) {
+                log.warn("Topic {} not found or has no partitions", topic);
+                continue;
+            }
+
+            // Create list of partition IDs [0, 1, 2, ..., n-1]
+            List<Integer> partitions = new ArrayList<>();
+            for (int i = 0; i < partitionCount; i++) {
+                partitions.add(i);
+            }
+
+            // Get list of consumer IDs
+            List<String> consumerList = new ArrayList<>(members.keySet());
+
+            // Use assignor strategy to assign partitions
+            Map<String, List<Integer>> topicAssignment = assignor.assign(partitions, consumerList);
+
+            // Merge topic assignment into current assignment
+            for (Map.Entry<String, List<Integer>> entry : topicAssignment.entrySet()) {
+                currentAssignment
+                        .computeIfAbsent(entry.getKey(), k -> new ArrayList<>())
+                        .addAll(entry.getValue());
+            }
+        }
+
+        // Increment generation
+        generationId++;
+        state = GroupState.STABLE;
+
+        log.info("Rebalance complete for group {}: generation={}, assignment={}",
+                groupId, generationId, currentAssignment);
+
+        return new HashMap<>(currentAssignment);
+    }
+
+    /**
+     * Get current assignment for a consumer
+     */
+    public List<Integer> getAssignment(String consumerId) {
+        return currentAssignment.getOrDefault(consumerId, Collections.emptyList());
+    }
+
+    /**
+     * Check if group is empty
+     */
     public boolean isEmpty() {
         return members.isEmpty();
     }
 
-    public String getGroupId() {
-        return groupId;
-    }
-
-    public Set<String> getSubscribedTopics() {
-        Set<String> topics = new HashSet<>();
-        members.values().forEach(topics::addAll);
-        return topics;
-    }
-
-    public int getMemberCount() {
+    /**
+     * Get number of members
+     */
+    public int size() {
         return members.size();
     }
 }

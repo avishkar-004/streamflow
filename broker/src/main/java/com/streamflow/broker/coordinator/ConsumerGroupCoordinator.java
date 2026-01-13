@@ -168,18 +168,25 @@ public class ConsumerGroupCoordinator {
         return counts;
     }
 
-
+    /**
+     * Background task: Monitor heartbeats and remove dead consumers
+     */
     private void startHeartbeatMonitoring() {
         scheduler.scheduleAtFixedRate(() -> {
             try {
                 for (ConsumerGroup group : groups.values()) {
                     List<String> deadMembers = group.findDeadMembers();
+
                     if (!deadMembers.isEmpty()) {
                         log.warn("Found {} dead members in group {}: {}",
                                 deadMembers.size(), group.getGroupId(), deadMembers);
+
+                        // Remove dead members
                         for (String deadMember : deadMembers) {
                             group.removeMember(deadMember);
                         }
+
+                        // Rebalance if group still has members
                         if (!group.isEmpty()) {
                             Map<String, Integer> partitionCounts =
                                     getPartitionCounts(group.getSubscribedTopics());
@@ -191,9 +198,41 @@ public class ConsumerGroupCoordinator {
                 log.error("Error in heartbeat monitoring", e);
             }
         }, HEARTBEAT_CHECK_INTERVAL_MS, HEARTBEAT_CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS);
+
         log.info("Started heartbeat monitoring (interval: {}ms)", HEARTBEAT_CHECK_INTERVAL_MS);
     }
 
+    /**
+     * Background task: Clean up empty groups
+     */
+    private void startGroupCleanup() {
+        scheduler.scheduleAtFixedRate(() -> {
+            try {
+                List<String> emptyGroups = new ArrayList<>();
+
+                for (Map.Entry<String, ConsumerGroup> entry : groups.entrySet()) {
+                    if (entry.getValue().isEmpty()) {
+                        emptyGroups.add(entry.getKey());
+                    }
+                }
+
+                // Remove empty groups
+                for (String groupId : emptyGroups) {
+                    groups.remove(groupId);
+                    log.info("Cleaned up empty group: {}", groupId);
+                }
+
+            } catch (Exception e) {
+                log.error("Error in group cleanup", e);
+            }
+        }, GROUP_CLEANUP_INTERVAL_MS, GROUP_CLEANUP_INTERVAL_MS, TimeUnit.MILLISECONDS);
+
+        log.info("Started group cleanup (interval: {}ms)", GROUP_CLEANUP_INTERVAL_MS);
+    }
+
+    /**
+     * Shutdown coordinator
+     */
     public void shutdown() {
         log.info("Shutting down ConsumerGroupCoordinator");
         scheduler.shutdown();
