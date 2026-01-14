@@ -63,6 +63,7 @@ public class ConsumerGroupCoordinator {
      * @param topics Topics to subscribe to
      * @return Partition assignment for this consumer
      */
+    // Generation fencing: reject stale rebalance requests from previous generation
     public synchronized List<Integer> joinGroup(String groupId, String consumerId, Set<String> topics) {
         log.info("Consumer {} joining group {} for topics {}", consumerId, groupId, topics);
 
