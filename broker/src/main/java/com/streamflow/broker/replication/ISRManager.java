@@ -98,13 +98,79 @@ public class ISRManager {
         String key = makeKey(topic, partition);
         Set<Integer> currentISR = isrMap.get(key);
 
+        if (currentISR == null) {
+            initializeISR(topic, partition, leaderBrokerId);
+            return;
+        }
 
-    public Set<Integer> getISR(String topic, int partition) {
-        String key = topic + "-" + partition;
-        return isrMap.getOrDefault(key, new ConcurrentSkipListSet<>());
+        // Check each follower's lag
+        for (java.util.Map.Entry<Integer, Long> entry : followerOffsets.entrySet()) {
+            int brokerId = entry.getKey();
+            long followerOffset = entry.getValue();
+            long lag = leaderOffset - followerOffset;
+
+            if (lag <= MAX_LAG_MESSAGES) {
+                // Follower is caught up, add to ISR
+                addToISR(topic, partition, brokerId);
+            } else {
+                // Follower is too far behind, remove from ISR
+                if (currentISR.contains(brokerId)) {
+                    log.warn("Replica {}-{} on broker {} fell behind (lag={}), removing from ISR",
+                            topic, partition, brokerId, lag);
+                    removeFromISR(topic, partition, brokerId);
+                }
+            }
+        }
     }
 
-    public void shutdown() {
-        scheduler.shutdown();
+    /**
+     * Calculate high watermark (minimum offset in ISR)
+     * This is the offset visible to consumers
+     */
+    public long calculateHighWatermark(long leaderOffset,
+                                      java.util.Map<Integer, Long> followerOffsets,
+                                      Set<Integer> isr) {
+        long hwm = leaderOffset;
+
+        // Find minimum offset among ISR members
+        for (Integer brokerId : isr) {
+            Long offset = followerOffsets.get(brokerId);
+            if (offset != null && offset < hwm) {
+                hwm = offset;
+            }
+        }
+
+        return hwm;
+    }
+
+    /**
+     * Check if ISR has minimum required replicas
+     */
+    public boolean hasMinISR(String topic, int partition, int minISR) {
+        Set<Integer> isr = getISR(topic, partition);
+        return isr.size() >= minISR;
+    }
+
+    /**
+     * Get ISR size
+     */
+    public int getISRSize(String topic, int partition) {
+        return getISR(topic, partition).size();
+    }
+
+    /**
+     * Clear ISR for a partition (when partition is deleted)
+     */
+    public void clearISR(String topic, int partition) {
+        String key = makeKey(topic, partition);
+        isrMap.remove(key);
+        log.info("Cleared ISR for {}-{}", topic, partition);
+    }
+
+    /**
+     * Create key for ISR map
+     */
+    private String makeKey(String topic, int partition) {
+        return topic + "-" + partition;
     }
 }

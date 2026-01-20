@@ -97,9 +97,3 @@ public class PartitionReplica {
         return leaderOffset - logEndOffset;
     }
 }
-
-    public long getLogEndOffset() { return logEndOffset; }
-    public int getBrokerId() { return brokerId; }
-    public ReplicaState getState() { return state; }
-    public long getLastFetchTimeMs() { return lastFetchTimeMs; }
-}
