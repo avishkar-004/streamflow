@@ -118,11 +118,7 @@ public class ReplicaFetcher implements Runnable {
     /**
      * Get current fetch offset
      */
-
-    public void shutdown() {
-        running = false;
-        interrupt();
+    public long getFetchOffset() {
+        return fetchOffset;
     }
-
-    public int getLeaderBrokerId() { return leaderBrokerId; }
 }
