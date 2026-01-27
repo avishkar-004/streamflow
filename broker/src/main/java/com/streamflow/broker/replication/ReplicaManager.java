@@ -128,12 +128,179 @@ public class ReplicaManager {
 
         if (replica == null) {
             log.error("Cannot become leader: replica {}-{} not found on broker {}",
+                    topicName, partitionId, brokerId);
+            return;
+        }
 
+        // Stop fetcher if was follower
+        stopReplicaFetcher(key);
+
+        // Promote to leader
+        replica.becomeLeader();
+        isrManager.initializeISR(topicName, partitionId, brokerId);
+
+        log.info("Broker {} became leader for {}-{}", brokerId, topicName, partitionId);
+    }
+
+    /**
+     * Make this replica a follower (after leader election elsewhere)
+     */
+    public void becomeFollower(String topicName, int partitionId, int newLeaderId) {
+        String key = makeKey(topicName, partitionId);
+        PartitionReplica replica = replicas.get(key);
+
+        if (replica == null) {
+            log.error("Cannot become follower: replica {}-{} not found on broker {}",
+                    topicName, partitionId, brokerId);
+            return;
+        }
+
+        // Demote to follower
+        replica.becomeFollower();
+
+        // Start fetching from new leader
+        startReplicaFetcher(replica, newLeaderId);
+
+        log.info("Broker {} became follower for {}-{}, leader is broker {}",
+                brokerId, topicName, partitionId, newLeaderId);
+    }
+
+    /**
+     * Get a replica
+     */
+    public PartitionReplica getReplica(String topicName, int partitionId) {
+        String key = makeKey(topicName, partitionId);
+        return replicas.get(key);
+    }
+
+    /**
+     * Check if this broker is the leader for a partition
+     */
+    public boolean isLeader(String topicName, int partitionId) {
+        PartitionReplica replica = getReplica(topicName, partitionId);
+        return replica != null && replica.isLeader();
+    }
+
+    /**
+     * Fetch messages from a partition (used by replica fetchers)
+     */
+    public List<Message> fetchMessages(String topicName, int partitionId,
+                                       long offset, int maxRecords, int maxBytes) {
+        PartitionReplica replica = getReplica(topicName, partitionId);
+        if (replica == null) {
+            return Collections.emptyList();
+        }
+
+        return replica.getPartition().read(offset, maxRecords, maxBytes);
+    }
+
+    /**
+     * Update ISR for a partition
+     */
+    public void updateISR(String topicName, int partitionId) {
+        PartitionReplica replica = getReplica(topicName, partitionId);
+        if (replica == null || !replica.isLeader()) {
+            return;
+        }
+
+        // In a full implementation, would collect follower offsets from all replicas
+        // For simplicity, we just maintain ISR with leader only
+        Map<Integer, Long> followerOffsets = new HashMap<>();
+        long leaderOffset = replica.getLogEndOffset();
+
+        isrManager.updateISR(topicName, partitionId, brokerId, leaderOffset, followerOffsets);
+
+        // Update high watermark
+        Set<Integer> isr = isrManager.getISR(topicName, partitionId);
+        long hwm = isrManager.calculateHighWatermark(leaderOffset, followerOffsets, isr);
+        replica.updateHighWatermark(hwm);
+    }
+
+    /**
+     * Get ISR for a partition
+     */
+    public Set<Integer> getISR(String topicName, int partitionId) {
+        return isrManager.getISR(topicName, partitionId);
+    }
+
+    /**
+     * Start a replica fetcher for a follower partition
+     */
+    private void startReplicaFetcher(PartitionReplica replica, int leaderBrokerId) {
+        String key = makeKey(replica.getTopicName(), replica.getPartitionId());
+
+        // Stop existing fetcher if any
+        stopReplicaFetcher(key);
+
+        // Create and start new fetcher
+        ReplicaFetcher fetcher = new ReplicaFetcher(
+                replica.getTopicName(),
+                replica.getPartitionId(),
+                replica.getPartition(),
+                this,
+                leaderBrokerId
+        );
+
+        activeFetchers.put(key, fetcher);
+        fetcherExecutor.submit(fetcher);
+
+        log.info("Started replica fetcher for {}-{} from broker {}",
+                replica.getTopicName(), replica.getPartitionId(), leaderBrokerId);
+    }
+
+    /**
+     * Stop a replica fetcher
+     */
+    private void stopReplicaFetcher(String key) {
+        ReplicaFetcher fetcher = activeFetchers.remove(key);
+        if (fetcher != null) {
+            fetcher.stop();
+            log.info("Stopped replica fetcher for {}", key);
+        }
+    }
+
+    /**
+     * Shutdown replica manager
+     */
     public void shutdown() {
         log.info("Shutting down ReplicaManager");
-        isrManager.shutdown();
-        for (ReplicaFetcher fetcher : fetchers.values()) {
-            fetcher.shutdown();
+
+        // Stop all fetchers
+        for (ReplicaFetcher fetcher : activeFetchers.values()) {
+            fetcher.stop();
         }
+
+        // Shutdown executor
+        fetcherExecutor.shutdown();
+        try {
+            if (!fetcherExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                fetcherExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            fetcherExecutor.shutdownNow();
+        }
+
+        log.info("ReplicaManager shutdown complete");
+    }
+
+    /**
+     * Create key for replica map
+     */
+    private String makeKey(String topic, int partition) {
+        return topic + "-" + partition;
+    }
+
+    /**
+     * Get all replicas on this broker
+     */
+    public Collection<PartitionReplica> getAllReplicas() {
+        return replicas.values();
+    }
+
+    /**
+     * Get number of replicas
+     */
+    public int getReplicaCount() {
+        return replicas.size();
     }
 }
