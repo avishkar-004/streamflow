@@ -35,6 +35,7 @@ public class ReplicaFetcher implements Runnable {
     // Fetch parameters
     private static final int MAX_FETCH_MESSAGES = 100;
     private static final int MAX_FETCH_BYTES = 1024 * 1024; // 1MB
+    // Optimized: reduced from 1000ms to 500ms for lower replication lag
     private static final long FETCH_INTERVAL_MS = 500; // Fetch every 500ms
 
     public ReplicaFetcher(String topicName, int partitionId, Partition localPartition,
