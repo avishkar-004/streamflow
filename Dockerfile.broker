@@ -1,0 +1,28 @@
+# Dockerfile for StreamFlow Broker
+FROM eclipse-temurin:17-jre-alpine
+
+# Set working directory
+WORKDIR /app
+
+# Copy broker JAR
+COPY broker/target/streamflow-broker-1.0.0-SNAPSHOT.jar /app/broker.jar
+COPY common/target/streamflow-common-1.0.0-SNAPSHOT.jar /app/lib/
+
+# Create data directory
+RUN mkdir -p /app/data
+
+# Expose broker port
+EXPOSE 9092
+
+# Set environment variables
+ENV BROKER_ID=0
+ENV HOST=0.0.0.0
+ENV PORT=9092
+ENV DATA_DIR=/app/data
+
+# Run broker
+ENTRYPOINT ["java", "-jar", "/app/broker.jar", \
+            "--broker-id", "${BROKER_ID}", \
+            "--host", "${HOST}", \
+            "--port", "${PORT}", \
+            "--data-dir", "${DATA_DIR}"]
