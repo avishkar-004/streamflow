@@ -1,0 +1,19 @@
+# Dockerfile for StreamFlow Admin API
+FROM eclipse-temurin:17-jre-alpine
+
+# Set working directory
+WORKDIR /app
+
+# Copy admin JAR
+COPY admin/target/streamflow-admin-1.0.0-SNAPSHOT.jar /app/admin.jar
+
+# Expose admin API port
+EXPOSE 8080
+
+# Set environment variables
+ENV SERVER_PORT=8080
+ENV BROKER_HOST=broker
+ENV BROKER_PORT=9092
+
+# Run admin API
+ENTRYPOINT ["java", "-jar", "/app/admin.jar"]
